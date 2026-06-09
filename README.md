@@ -1,6 +1,6 @@
 # EPP 575 Introduction to RNA-Seq
 
-EPP 575 Introduction to RNA-Seq is being offered as a 5 day, 1 credit-hour course (CRN 87151).
+EPP 575 Introduction to RNA-Seq is being offered as a 6 day, 1 credit-hour course (CRN 87151).
 
 For course content, please see the [wiki](https://github.com/ryandkuster/EPP_575_RNA_26/wiki).
 
