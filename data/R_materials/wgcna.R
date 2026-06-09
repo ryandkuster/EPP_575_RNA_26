@@ -1,13 +1,5 @@
-# additional packages we'll need for WGCNA
-
-# This script is derived from:
-# https://bioinformaticsworkbook.org/tutorials/wgcna.html#gsc.tab=0
-# and:
-# https://rpubs.com/natmurad/WGCNA
-
-BiocManager::install("WGCNA", force=TRUE)
-install.packages("magrittr")
-BiocManager::install("genefilter")
+# Manually tell RStudio Server where to find the pre-installed R Packages
+.libPaths(c("/lustre/isaac24/proj/UTK0386/R"))
 
 library(tidyverse)
 library(magrittr)
@@ -19,22 +11,14 @@ library(tximport)
 library(GenomicFeatures)
 library(genefilter)
 library(R.utils)
+library(txdbmaker)
 
 allowWGCNAThreads()
 
-if (requireNamespace("rstudioapi", quietly = TRUE)) {
-  # Get active document context
-  doc_context <- rstudioapi::getActiveDocumentContext()
-  # Extract directory path
-  script_dir <- dirname(doc_context$path)
-} else {
-  script_dir <- normalizePath(path = commandArgs()[1])
-}
-script_dir = dirname(script_dir)
-setwd(script_dir)
+setwd(paste0("/lustre/isaac24/proj/UTK0386/analysis/", Sys.getenv("USER"), "/05_count"))
 
-# give the full path to the "salmon_results" (it should end in "salmon_results"
-salmon_dir <- paste0(script_dir, "/salmon_output")
+# give the full path to the "salmon_results" (it should end in "salmon_results")
+salmon_dir <- "/lustre/isaac24/proj/UTK0386/data/EPP_575_RNA_26/data/salmon_output/"
 
 # load the gff3 file, then create a transcript database/dataframe for use with deseq
 download.file("https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/735/GCA_000001735.2_TAIR10.1/GCA_000001735.2_TAIR10.1_genomic.gff.gz", destfile = "GCA_000001735.2_TAIR10.1_genomic.gff.gz", method = "wget")
@@ -47,8 +31,9 @@ str(k)
 
 txdf = AnnotationDbi::select(txdb, k, "GENEID", "CDSNAME")
 
-samples <- read_csv(paste0(script_dir, "/salmon_output/salmon_data.csv"))
+samples <- read_csv(paste0(salmon_dir, "salmon_data.csv"))
 Qfiles <- file.path(salmon_dir, samples$quant_file)
+
 
 # this step imports the count data from salmon
 txi <- tximport(files = Qfiles, type = "salmon", txOut = TRUE)
@@ -63,30 +48,37 @@ samples$replicate = factor(samples$replicate)
 # now we convert the txi object into a deseq-formatted object
 dds <- DESeqDataSetFromTximport(txi = txi, colData = samples, design = ~ treatment + time + treatment:time)
 dds <- DESeq(dds, test="LRT", reduced = ~ treatment + time)
+
+# if a model fails to converge (usually due to many zero count genes) remake model dropping those genes
 dds <- dds[which(mcols(dds)$fullBetaConv),]
 
 # transform data
 vsd <- varianceStabilizingTransformation(dds)
+
+# get vst data as a matrix for wgcna
 wpn_vsd <- getVarianceStabilizedData(dds)
 rv_wpn <- rowVars(wpn_vsd)
 summary(rv_wpn)
 
 # limit the count by quantiles
-# (this will remove MANY genes, try a few settings and see how it affects your dataset)
-q_cutoff = .7
-q_cutoff = .95
+sapply(c(0.50, 0.75, 0.90), function(q) sum(rv_wpn > quantile(rv_wpn, q)))
 
-quantile_wpn <- quantile( rowVars(wpn_vsd), q_cutoff)  # <= changed to 95 quantile to reduce dataset
+# (this will remove MANY genes, try a few settings and see how it affects your dataset)
+# .95 will keep only the top 10% most variable genes
+q_cutoff = .9
+
+quantile_wpn <- quantile( rowVars(wpn_vsd), q_cutoff)  # <= changed to 90 quantile to reduce dataset
 expr_normalized <- wpn_vsd[ rv_wpn > quantile_wpn, ]
-expr_normalized[1:5,1:6]
 dim(expr_normalized)
 
+# make data "long" for ggplot
 expr_normalized_df <- data.frame(expr_normalized) %>%
   mutate(
     Gene_id = row.names(expr_normalized)
   ) %>%
   pivot_longer(-Gene_id)
 
+# make a violin plot of normalized expression values
 expr_normalized_df %>% ggplot(., aes(x = name, y = value)) +
   geom_violin() +
   geom_point() +
@@ -96,11 +88,10 @@ expr_normalized_df %>% ggplot(., aes(x = name, y = value)) +
   ) +
   ylim(0, NA) +
   labs(
-    title = "Normalized and 95 quantile Expression",
+    title = "Normalized and 90 quantile Expression",
     x = "treatment",
     y = "normalized expression"
   )
-
 
 input_mat = t(expr_normalized)
 input_mat[1:5,1:6]
@@ -115,6 +106,12 @@ plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="",
 # now we will visualize our topology to determine a target cutoff
 powers = c(c(1:10), seq(from = 12, to = 20, by = 2))
 
+# WGCNA converts a correlation matrix into a weighted network by raising
+# correlations to a power β. This step tests a range of powers to find the one
+# where the network best approximates scale-free topology — a property of most
+# real biological networks where a few "hub" genes have many connections and
+# most genes have few.
+
 sft = pickSoftThreshold(
   input_mat,             # <= Input data
   #blockSize = 30,
@@ -122,6 +119,7 @@ sft = pickSoftThreshold(
   verbose = 5
 )
 
+# make a plot; this will help determine the threshold to use
 par(mfrow = c(1,2));
 cex1 = 0.9;
 
@@ -148,6 +146,7 @@ text(sft$fitIndices[, 1],
      labels = powers,
      cex = cex1, col = "red")
 
+
 # STOP!
 # visually inspect the plot to see if there is a point where we see an "elbow"
 # this elbow tells us where we get diminishing returns from increasing the soft
@@ -157,6 +156,7 @@ picked_power = 7
 temp_cor <- cor       
 cor <- WGCNA::cor
 
+# this step takes a minute...
 netwk <- blockwiseModules(input_mat,                # <= input here
                           
                           # == Adjacency Function ==
@@ -211,11 +211,10 @@ module_df <- data.frame(
 
 module_df[1:5,]
 
+# save the network
 write_delim(module_df,
-            file = paste0(script_dir, "/wgcna_output/gene_modules.txt"),
+            file = "gene_modules.txt",
             delim = "\t")
-
-
 
 # Get Module Eigengenes per cluster
 MEs0 <- moduleEigengenes(input_mat, mergedColors)$eigengenes
@@ -248,7 +247,7 @@ mME %>% ggplot(., aes(x=treatment, y=name, fill=value)) +
   labs(title = "Module-trait Relationships", y = "Modules", fill="corr")
 
 # pick out a few modules of interest here
-modules_of_interest = c("pink")
+modules_of_interest = c("magenta")
 
 # Pull out list of genes in that module
 submod = module_df %>%
@@ -284,6 +283,8 @@ genes_of_interest = module_df %>%
 
 expr_of_interest = expr_normalized[genes_of_interest$gene_id,]
 
+# TOMs are "topical overlay matrices
+# how similar are gene A and gene B's entire connection patterns across all other genes?
 TOM = TOMsimilarityFromExpr(t(expr_of_interest),
                             power = picked_power)
 
@@ -303,11 +304,10 @@ edge_list = data.frame(TOM) %>%
     module2 = module_df[gene2,]$colors
   )
 
-
-########################
-
+# inspect the edge list; it contains all gene to gene correlations
 head(edge_list)
 
+# save edge list
 write_delim(edge_list,
-            file = paste0(script_dir, "/wgcna_output/edgelist.tsv"),
+            file = "edgelist.tsv",
             delim = "\t")
